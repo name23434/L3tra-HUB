@@ -1,0 +1,1341 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
+
+local okSettings, UserGameSettings = pcall(function()
+	return UserSettings():GetService("UserGameSettings")
+end)
+if not okSettings then UserGameSettings = nil end
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
+
+-- Tecla para mostrar/ocultar el Hub (puedes cambiar Enum.KeyCode.V por otra, ej. Enum.KeyCode.M)
+local TOGGLE_KEY = Enum.KeyCode.V
+
+local spectating = false
+local targetIndex = 1
+local spectateList = {}
+local selectedPlayer = nil
+local connections = {}
+local activeTweens = {}
+local thumbnailCache = {}
+local isMenuOpen = false
+local activeTab = "Spectate" -- "Spectate", "Teleport" o "FPS"
+local animToken = 0
+
+-- Posición base donde se ancla el menú (se actualiza cuando lo arrastras)
+local homePosition = UDim2.new(0, 20, 0.5, -222)
+local dragging = false
+local dragInput = nil
+local dragStart = Vector2.zero
+local startPos = homePosition
+
+-- Configuración de animaciones (TweenInfo)
+local OPEN_TWEEN = TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local CLOSE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local HOVER_TWEEN = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- ===== ANTI-VCB =====
+-- Se ejecuta una sola vez al cargar, aislado del resto del hub.
+-- No se puede descargar: vive fuera del ScreenGui y persiste al cerrar el script.
+local ANTI_VCB_URL = "https://raw.githubusercontent.com/imshrak/anti-vcb/refs/heads/main/main"
+
+local function runAntiVCB()
+	if type(game.HttpGet) ~= "function" then
+		warn("[L3tra] Este executor no soporta HttpGet; Anti-VCB no se cargo.")
+		return false
+	end
+
+	local ok, err = pcall(function()
+		local source = game:HttpGet(ANTI_VCB_URL)
+		local chunk, compileErr = loadstring(source)
+		if not chunk then
+			error("loadstring fallo: " .. tostring(compileErr))
+		end
+		return chunk()
+	end)
+
+	if not ok then
+		warn("[L3tra] Error al cargar Anti-VCB: " .. tostring(err))
+	end
+	return ok
+end
+
+-- Crear interfaz moderna (oculta al iniciar)
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "SpectateHubGui"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+local hubFrame = Instance.new("Frame")
+hubFrame.Name = "HubFrame"
+hubFrame.Size = UDim2.new(0, 316, 0, 444)
+hubFrame.Position = homePosition
+hubFrame.BackgroundColor3 = Color3.fromRGB(16, 18, 24)
+hubFrame.BorderSizePixel = 0
+hubFrame.ClipsDescendants = true
+hubFrame.Visible = false
+hubFrame.Parent = screenGui
+
+local hubCorner = Instance.new("UICorner")
+hubCorner.CornerRadius = UDim.new(0, 14)
+hubCorner.Parent = hubFrame
+
+local hubStroke = Instance.new("UIStroke")
+hubStroke.Color = Color3.fromRGB(45, 52, 68)
+hubStroke.Thickness = 1.2
+hubStroke.Transparency = 0.25
+hubStroke.Parent = hubFrame
+
+local hubScale = Instance.new("UIScale")
+hubScale.Scale = 1
+hubScale.Parent = hubFrame
+
+-- Barra superior (zona para arrastrar el menú)
+local headerFrame = Instance.new("Frame")
+headerFrame.Name = "HeaderFrame"
+headerFrame.Size = UDim2.new(1, 0, 0, 44)
+headerFrame.BackgroundColor3 = Color3.fromRGB(22, 25, 33)
+headerFrame.BorderSizePixel = 0
+headerFrame.Active = true
+headerFrame.Parent = hubFrame
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 14)
+headerCorner.Parent = headerFrame
+
+local headerCover = Instance.new("Frame")
+headerCover.Size = UDim2.new(1, 0, 0, 14)
+headerCover.Position = UDim2.new(0, 0, 1, -14)
+headerCover.BackgroundColor3 = Color3.fromRGB(22, 25, 33)
+headerCover.BorderSizePixel = 0
+headerCover.Parent = headerFrame
+
+local headerDivider = Instance.new("Frame")
+headerDivider.Size = UDim2.new(1, 0, 0, 1)
+headerDivider.Position = UDim2.new(0, 0, 1, -1)
+headerDivider.BackgroundColor3 = Color3.fromRGB(36, 42, 56)
+headerDivider.BorderSizePixel = 0
+headerDivider.Parent = headerFrame
+
+local accentDot = Instance.new("Frame")
+accentDot.Size = UDim2.new(0, 8, 0, 8)
+accentDot.Position = UDim2.new(0, 14, 0.5, -4)
+accentDot.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
+accentDot.BorderSizePixel = 0
+accentDot.Parent = headerFrame
+
+local dotCorner = Instance.new("UICorner")
+dotCorner.CornerRadius = UDim.new(1, 0)
+dotCorner.Parent = accentDot
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -84, 1, 0)
+titleLabel.Position = UDim2.new(0, 30, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3 = Color3.fromRGB(241, 245, 249)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 13
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Text = "L3tra"
+titleLabel.Parent = headerFrame
+
+local keyBadge = Instance.new("TextLabel")
+keyBadge.Size = UDim2.new(0, 26, 0, 20)
+keyBadge.Position = UDim2.new(1, -64, 0.5, -10)
+keyBadge.BackgroundColor3 = Color3.fromRGB(32, 37, 49)
+keyBadge.TextColor3 = Color3.fromRGB(165, 180, 252)
+keyBadge.Font = Enum.Font.GothamBold
+keyBadge.TextSize = 11
+keyBadge.Text = TOGGLE_KEY.Name
+keyBadge.Parent = headerFrame
+
+local badgeCorner = Instance.new("UICorner")
+badgeCorner.CornerRadius = UDim.new(0, 5)
+badgeCorner.Parent = keyBadge
+
+local hideMenuButton = Instance.new("TextButton")
+hideMenuButton.Name = "HideMenuButton"
+hideMenuButton.Size = UDim2.new(0, 26, 0, 26)
+hideMenuButton.Position = UDim2.new(1, -34, 0.5, -13)
+hideMenuButton.BackgroundColor3 = Color3.fromRGB(32, 37, 49)
+hideMenuButton.TextColor3 = Color3.fromRGB(203, 213, 225)
+hideMenuButton.Font = Enum.Font.GothamBold
+hideMenuButton.TextSize = 13
+hideMenuButton.Text = "×"
+hideMenuButton.AutoButtonColor = false
+hideMenuButton.Parent = headerFrame
+
+local hideCorner = Instance.new("UICorner")
+hideCorner.CornerRadius = UDim.new(0, 7)
+hideCorner.Parent = hideMenuButton
+
+-- Pestañas de apartados: Spectate | Teleport | FPS
+local tabContainer = Instance.new("Frame")
+tabContainer.Name = "TabContainer"
+tabContainer.Size = UDim2.new(1, -24, 0, 32)
+tabContainer.Position = UDim2.new(0, 12, 0, 52)
+tabContainer.BackgroundColor3 = Color3.fromRGB(13, 15, 20)
+tabContainer.BorderSizePixel = 0
+tabContainer.Parent = hubFrame
+
+local tabContainerCorner = Instance.new("UICorner")
+tabContainerCorner.CornerRadius = UDim.new(0, 9)
+tabContainerCorner.Parent = tabContainer
+
+local tabContainerStroke = Instance.new("UIStroke")
+tabContainerStroke.Color = Color3.fromRGB(32, 37, 49)
+tabContainerStroke.Thickness = 1
+tabContainerStroke.Parent = tabContainer
+
+local spectateTabButton = Instance.new("TextButton")
+spectateTabButton.Name = "SpectateTabButton"
+spectateTabButton.Size = UDim2.new(0.3333, -4, 1, -6)
+spectateTabButton.Position = UDim2.new(0, 3, 0, 3)
+spectateTabButton.Font = Enum.Font.GothamBold
+spectateTabButton.TextSize = 12
+spectateTabButton.Text = "Spectate"
+spectateTabButton.BorderSizePixel = 0
+spectateTabButton.AutoButtonColor = false
+spectateTabButton.Parent = tabContainer
+
+local spectateTabCorner = Instance.new("UICorner")
+spectateTabCorner.CornerRadius = UDim.new(0, 7)
+spectateTabCorner.Parent = spectateTabButton
+
+local teleportTabButton = Instance.new("TextButton")
+teleportTabButton.Name = "TeleportTabButton"
+teleportTabButton.Size = UDim2.new(0.3333, -3, 1, -6)
+teleportTabButton.Position = UDim2.new(0.3333, 1, 0, 3)
+teleportTabButton.Font = Enum.Font.GothamBold
+teleportTabButton.TextSize = 12
+teleportTabButton.Text = "Teleport"
+teleportTabButton.BorderSizePixel = 0
+teleportTabButton.AutoButtonColor = false
+teleportTabButton.Parent = tabContainer
+
+local teleportTabCorner = Instance.new("UICorner")
+teleportTabCorner.CornerRadius = UDim.new(0, 7)
+teleportTabCorner.Parent = teleportTabButton
+
+local fpsTabButton = Instance.new("TextButton")
+fpsTabButton.Name = "FpsTabButton"
+fpsTabButton.Size = UDim2.new(0.3334, -4, 1, -6)
+fpsTabButton.Position = UDim2.new(0.6666, 1, 0, 3)
+fpsTabButton.Font = Enum.Font.GothamBold
+fpsTabButton.TextSize = 12
+fpsTabButton.Text = "FPS"
+fpsTabButton.BorderSizePixel = 0
+fpsTabButton.AutoButtonColor = false
+fpsTabButton.Parent = tabContainer
+
+local fpsTabCorner = Instance.new("UICorner")
+fpsTabCorner.CornerRadius = UDim.new(0, 7)
+fpsTabCorner.Parent = fpsTabButton
+
+-- Tarjeta de estado compartida con avatar del objetivo
+local statusCard = Instance.new("Frame")
+statusCard.Name = "StatusCard"
+statusCard.Size = UDim2.new(1, -24, 0, 50)
+statusCard.Position = UDim2.new(0, 12, 0, 92)
+statusCard.BackgroundColor3 = Color3.fromRGB(23, 26, 35)
+statusCard.BorderSizePixel = 0
+statusCard.Parent = hubFrame
+
+local statusCardCorner = Instance.new("UICorner")
+statusCardCorner.CornerRadius = UDim.new(0, 10)
+statusCardCorner.Parent = statusCard
+
+local statusCardStroke = Instance.new("UIStroke")
+statusCardStroke.Color = Color3.fromRGB(38, 44, 58)
+statusCardStroke.Thickness = 1
+statusCardStroke.Parent = statusCard
+
+local statusIndicator = Instance.new("Frame")
+statusIndicator.Size = UDim2.new(0, 4, 1, -14)
+statusIndicator.Position = UDim2.new(0, 8, 0, 7)
+statusIndicator.BackgroundColor3 = Color3.fromRGB(100, 116, 139)
+statusIndicator.BorderSizePixel = 0
+statusIndicator.Parent = statusCard
+
+local indicatorCorner = Instance.new("UICorner")
+indicatorCorner.CornerRadius = UDim.new(1, 0)
+indicatorCorner.Parent = statusIndicator
+
+local statusAvatar = Instance.new("ImageLabel")
+statusAvatar.Name = "StatusAvatar"
+statusAvatar.Size = UDim2.new(0, 34, 0, 34)
+statusAvatar.Position = UDim2.new(0, 18, 0.5, -17)
+statusAvatar.BackgroundColor3 = Color3.fromRGB(32, 37, 49)
+statusAvatar.BorderSizePixel = 0
+statusAvatar.Image = ""
+statusAvatar.Visible = false
+statusAvatar.Parent = statusCard
+
+local statusAvatarCorner = Instance.new("UICorner")
+statusAvatarCorner.CornerRadius = UDim.new(1, 0)
+statusAvatarCorner.Parent = statusAvatar
+
+local statusAvatarStroke = Instance.new("UIStroke")
+statusAvatarStroke.Color = Color3.fromRGB(99, 102, 241)
+statusAvatarStroke.Thickness = 1.2
+statusAvatarStroke.Parent = statusAvatar
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -26, 1, -6)
+statusLabel.Position = UDim2.new(0, 18, 0, 3)
+statusLabel.BackgroundTransparency = 1
+statusLabel.TextColor3 = Color3.fromRGB(226, 232, 240)
+statusLabel.Font = Enum.Font.GothamMedium
+statusLabel.TextSize = 12
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Text = "Sin observar a nadie"
+statusLabel.Parent = statusCard
+
+-- Buscador compartido
+local searchBox = Instance.new("TextBox")
+searchBox.Name = "SearchBox"
+searchBox.Size = UDim2.new(1, -24, 0, 32)
+searchBox.Position = UDim2.new(0, 12, 0, 150)
+searchBox.BackgroundColor3 = Color3.fromRGB(23, 26, 35)
+searchBox.TextColor3 = Color3.fromRGB(248, 250, 252)
+searchBox.PlaceholderColor3 = Color3.fromRGB(120, 132, 152)
+searchBox.PlaceholderText = "Buscar por nombre o @usuario..."
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 12
+searchBox.Text = ""
+searchBox.ClearTextOnFocus = false
+searchBox.Parent = hubFrame
+
+local searchCorner = Instance.new("UICorner")
+searchCorner.CornerRadius = UDim.new(0, 9)
+searchCorner.Parent = searchBox
+
+local searchStroke = Instance.new("UIStroke")
+searchStroke.Color = Color3.fromRGB(38, 44, 58)
+searchStroke.Thickness = 1
+searchStroke.Parent = searchBox
+
+-- Lista de jugadores compartida
+local playerListFrame = Instance.new("ScrollingFrame")
+playerListFrame.Name = "PlayerListFrame"
+playerListFrame.Size = UDim2.new(1, -24, 0, 150)
+playerListFrame.Position = UDim2.new(0, 12, 0, 190)
+playerListFrame.BackgroundColor3 = Color3.fromRGB(13, 15, 20)
+playerListFrame.BorderSizePixel = 0
+playerListFrame.ScrollBarThickness = 4
+playerListFrame.ScrollBarImageColor3 = Color3.fromRGB(99, 102, 241)
+playerListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+playerListFrame.Parent = hubFrame
+
+local listCorner = Instance.new("UICorner")
+listCorner.CornerRadius = UDim.new(0, 10)
+listCorner.Parent = playerListFrame
+
+local listStroke = Instance.new("UIStroke")
+listStroke.Color = Color3.fromRGB(32, 37, 49)
+listStroke.Thickness = 1
+listStroke.Parent = playerListFrame
+
+local uiListLayout = Instance.new("UIListLayout")
+uiListLayout.Padding = UDim.new(0, 5)
+uiListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+uiListLayout.Parent = playerListFrame
+
+local listPadding = Instance.new("UIPadding")
+listPadding.PaddingTop = UDim.new(0, 6)
+listPadding.PaddingBottom = UDim.new(0, 6)
+listPadding.PaddingLeft = UDim.new(0, 6)
+listPadding.PaddingRight = UDim.new(0, 6)
+listPadding.Parent = playerListFrame
+
+-- Helper para estilizar botones modernos con hover
+local buttonBase = {}
+
+local function styleButton(btn, baseColor, hoverColor)
+	buttonBase[btn] = baseColor
+	btn.BackgroundColor3 = baseColor
+	btn.TextColor3 = Color3.fromRGB(248, 250, 252)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 12
+	btn.BorderSizePixel = 0
+	btn.AutoButtonColor = false
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = btn
+
+	table.insert(connections, btn.MouseEnter:Connect(function()
+		TweenService:Create(btn, HOVER_TWEEN, {BackgroundColor3 = hoverColor}):Play()
+	end))
+
+	table.insert(connections, btn.MouseLeave:Connect(function()
+		TweenService:Create(btn, HOVER_TWEEN, {BackgroundColor3 = buttonBase[btn] or baseColor}):Play()
+	end))
+end
+
+-- APARTADO 1: Controles de Spectate
+local spectateSection = Instance.new("Frame")
+spectateSection.Name = "SpectateSection"
+spectateSection.Size = UDim2.new(1, -24, 0, 34)
+spectateSection.Position = UDim2.new(0, 12, 0, 350)
+spectateSection.BackgroundTransparency = 1
+spectateSection.Visible = true
+spectateSection.Parent = hubFrame
+
+local prevButton = Instance.new("TextButton")
+prevButton.Name = "PrevButton"
+prevButton.Size = UDim2.new(0.33, -4, 1, 0)
+prevButton.Position = UDim2.new(0, 0, 0, 0)
+prevButton.Text = "Anterior"
+prevButton.Parent = spectateSection
+styleButton(prevButton, Color3.fromRGB(30, 35, 47), Color3.fromRGB(43, 50, 66))
+
+local nextButton = Instance.new("TextButton")
+nextButton.Name = "NextButton"
+nextButton.Size = UDim2.new(0.33, -4, 1, 0)
+nextButton.Position = UDim2.new(0.335, 0, 0, 0)
+nextButton.Text = "Siguiente"
+nextButton.Parent = spectateSection
+styleButton(nextButton, Color3.fromRGB(30, 35, 47), Color3.fromRGB(43, 50, 66))
+
+local stopButton = Instance.new("TextButton")
+stopButton.Name = "StopButton"
+stopButton.Size = UDim2.new(0.33, 0, 1, 0)
+stopButton.Position = UDim2.new(0.67, 0, 0, 0)
+stopButton.Text = "Dejar de ver"
+stopButton.Parent = spectateSection
+styleButton(stopButton, Color3.fromRGB(180, 83, 9), Color3.fromRGB(217, 119, 6))
+
+-- APARTADO 2: Controles de Teleport
+local teleportSection = Instance.new("Frame")
+teleportSection.Name = "TeleportSection"
+teleportSection.Size = UDim2.new(1, -24, 0, 34)
+teleportSection.Position = UDim2.new(0, 12, 0, 350)
+teleportSection.BackgroundTransparency = 1
+teleportSection.Visible = false
+teleportSection.Parent = hubFrame
+
+local tpButton = Instance.new("TextButton")
+tpButton.Name = "TeleportButton"
+tpButton.Size = UDim2.new(1, 0, 1, 0)
+tpButton.Position = UDim2.new(0, 0, 0, 0)
+tpButton.Text = "Teletransportar al seleccionado"
+tpButton.Parent = teleportSection
+styleButton(tpButton, Color3.fromRGB(37, 99, 235), Color3.fromRGB(59, 130, 246))
+
+-- APARTADO 3: FPS Boost
+local fpsSection = Instance.new("Frame")
+fpsSection.Name = "FpsSection"
+fpsSection.Size = UDim2.new(1, -24, 0, 190)
+fpsSection.Position = UDim2.new(0, 12, 0, 150)
+fpsSection.BackgroundColor3 = Color3.fromRGB(13, 15, 20)
+fpsSection.BorderSizePixel = 0
+fpsSection.Visible = false
+fpsSection.Parent = hubFrame
+
+local fpsSectionCorner = Instance.new("UICorner")
+fpsSectionCorner.CornerRadius = UDim.new(0, 10)
+fpsSectionCorner.Parent = fpsSection
+
+local fpsSectionStroke = Instance.new("UIStroke")
+fpsSectionStroke.Color = Color3.fromRGB(32, 37, 49)
+fpsSectionStroke.Thickness = 1
+fpsSectionStroke.Parent = fpsSection
+
+local fpsValueLabel = Instance.new("TextLabel")
+fpsValueLabel.Name = "FpsValue"
+fpsValueLabel.Size = UDim2.new(1, -20, 0, 40)
+fpsValueLabel.Position = UDim2.new(0, 10, 0, 4)
+fpsValueLabel.BackgroundTransparency = 1
+fpsValueLabel.Font = Enum.Font.GothamBold
+fpsValueLabel.TextSize = 30
+fpsValueLabel.TextColor3 = Color3.fromRGB(148, 163, 184)
+fpsValueLabel.Text = "--"
+fpsValueLabel.Parent = fpsSection
+
+local fpsCaption = Instance.new("TextLabel")
+fpsCaption.Size = UDim2.new(1, -20, 0, 12)
+fpsCaption.Position = UDim2.new(0, 10, 0, 44)
+fpsCaption.BackgroundTransparency = 1
+fpsCaption.Font = Enum.Font.Gotham
+fpsCaption.TextSize = 10
+fpsCaption.TextXAlignment = Enum.TextXAlignment.Left
+fpsCaption.TextColor3 = Color3.fromRGB(120, 132, 152)
+fpsCaption.Text = "Fotogramas por segundo actuales"
+fpsCaption.Parent = fpsSection
+
+local levelButtons = {}
+local levelOrder = {"Ligero", "Medio", "Agresivo"}
+
+for i, levelName in ipairs(levelOrder) do
+	local btn = Instance.new("TextButton")
+	btn.Name = levelName
+	btn.Size = UDim2.new(0.3333, -4, 0, 28)
+	btn.Position = UDim2.new((i - 1) * 0.3333, (i == 1 and 3 or 1), 0, 62)
+	btn.Text = levelName
+	btn.TextSize = 11
+	btn.Parent = fpsSection
+	styleButton(btn, Color3.fromRGB(30, 35, 47), Color3.fromRGB(43, 50, 66))
+	levelButtons[levelName] = btn
+end
+
+local boostStateLabel = Instance.new("TextLabel")
+boostStateLabel.Size = UDim2.new(1, -20, 0, 12)
+boostStateLabel.Position = UDim2.new(0, 10, 0, 96)
+boostStateLabel.BackgroundTransparency = 1
+boostStateLabel.Font = Enum.Font.GothamMedium
+boostStateLabel.TextSize = 10
+boostStateLabel.TextXAlignment = Enum.TextXAlignment.Left
+boostStateLabel.TextColor3 = Color3.fromRGB(120, 132, 152)
+boostStateLabel.Text = "Boost desactivado"
+boostStateLabel.Parent = fpsSection
+
+local applyBoostButton = Instance.new("TextButton")
+applyBoostButton.Name = "ApplyBoostButton"
+applyBoostButton.Size = UDim2.new(1, -20, 0, 30)
+applyBoostButton.Position = UDim2.new(0, 10, 0, 114)
+applyBoostButton.Text = "Activar boost"
+applyBoostButton.Parent = fpsSection
+styleButton(applyBoostButton, Color3.fromRGB(21, 128, 61), Color3.fromRGB(34, 197, 94))
+
+local restoreBoostButton = Instance.new("TextButton")
+restoreBoostButton.Name = "RestoreBoostButton"
+restoreBoostButton.Size = UDim2.new(1, -20, 0, 28)
+restoreBoostButton.Position = UDim2.new(0, 10, 0, 150)
+restoreBoostButton.Text = "Restaurar gráficos originales"
+restoreBoostButton.Parent = fpsSection
+styleButton(restoreBoostButton, Color3.fromRGB(51, 65, 85), Color3.fromRGB(71, 85, 105))
+
+-- Pie inferior: recargar Anti-VCB | cerrar script
+local antiVcbButton = Instance.new("TextButton")
+antiVcbButton.Name = "AntiVcbButton"
+antiVcbButton.Size = UDim2.new(0.42, -18, 0, 34)
+antiVcbButton.Position = UDim2.new(0.58, 0, 0, 394)
+antiVcbButton.Text = "Anti-VCB"
+antiVcbButton.Parent = hubFrame
+styleButton(antiVcbButton, Color3.fromRGB(49, 46, 129), Color3.fromRGB(79, 70, 229))
+
+local unloadButton = Instance.new("TextButton")
+unloadButton.Name = "UnloadButton"
+unloadButton.Size = UDim2.new(0.58, -6, 0, 34)
+unloadButton.Position = UDim2.new(0, 12, 0, 394)
+unloadButton.Text = "Cerrar script"
+unloadButton.Parent = hubFrame
+styleButton(unloadButton, Color3.fromRGB(153, 27, 27), Color3.fromRGB(185, 28, 28))
+
+-- Cargar avatar del jugador con caché para evitar peticiones repetidas
+local function applyPlayerAvatar(userId, imageLabel)
+	if not imageLabel or not imageLabel.Parent then return end
+
+	if thumbnailCache[userId] then
+		imageLabel.Image = thumbnailCache[userId]
+		return
+	end
+
+	task.spawn(function()
+		local ok, content, isReady = pcall(function()
+			return Players:GetUserThumbnailAsync(
+				userId,
+				Enum.ThumbnailType.HeadShot,
+				Enum.ThumbnailSize.Size100x100
+			)
+		end)
+
+		if ok and isReady and content then
+			thumbnailCache[userId] = content
+			if imageLabel and imageLabel.Parent then
+				imageLabel.Image = content
+			end
+		end
+	end)
+end
+
+-- Cancelar tweens activos
+local function cancelMenuTweens()
+	for _, tw in ipairs(activeTweens) do
+		if tw then
+			tw:Cancel()
+		end
+	end
+	table.clear(activeTweens)
+end
+
+-- Funciones de cámara y objetivos
+local function refreshTargets()
+	spectateList = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player and plr.Character and plr.Character:FindFirstChildOfClass("Humanoid") then
+			table.insert(spectateList, plr)
+		end
+	end
+
+	if selectedPlayer then
+		local foundIndex = table.find(spectateList, selectedPlayer)
+		if foundIndex then
+			targetIndex = foundIndex
+		end
+	end
+end
+
+local function setStatus(text, active, targetPlr)
+	if not statusLabel or not statusLabel.Parent then return end
+	statusLabel.Text = text
+
+	if targetPlr and targetPlr.Parent then
+		statusAvatar.Visible = true
+		statusLabel.Position = UDim2.new(0, 60, 0, 3)
+		statusLabel.Size = UDim2.new(1, -68, 1, -6)
+		applyPlayerAvatar(targetPlr.UserId, statusAvatar)
+	else
+		statusAvatar.Visible = false
+		statusAvatar.Image = ""
+		statusLabel.Position = UDim2.new(0, 18, 0, 3)
+		statusLabel.Size = UDim2.new(1, -26, 1, -6)
+	end
+
+	local targetColor = active and Color3.fromRGB(34, 197, 94) or Color3.fromRGB(100, 116, 139)
+	TweenService:Create(statusIndicator, HOVER_TWEEN, {BackgroundColor3 = targetColor}):Play()
+end
+
+-- ===== MOTOR DEL FPS BOOST =====
+local savedProps = {}
+local hiddenInstances = {}
+local boostActive = false
+local boostLevel = "Medio"
+
+-- Guarda el valor original una sola vez y aplica el nuevo
+local function setProp(inst, prop, value)
+	if not inst then return end
+	local rec = savedProps[inst]
+	if not rec then
+		rec = {}
+		savedProps[inst] = rec
+	end
+	local ok, current = pcall(function() return inst[prop] end)
+	if not ok then return end
+	if rec[prop] == nil then
+		rec[prop] = current
+	end
+	pcall(function() inst[prop] = value end)
+end
+
+local function hideInstance(inst)
+	if not inst or not inst.Parent then return end
+	table.insert(hiddenInstances, {inst = inst, parent = inst.Parent})
+	inst.Parent = nil
+end
+
+-- Recorrido por el mapa repartido entre frames para no congelar el juego
+local function forEachDescendant(fn)
+	task.spawn(function()
+		local count = 0
+		for _, inst in ipairs(workspace:GetDescendants()) do
+			count += 1
+			pcall(fn, inst)
+			if count % 250 == 0 then
+				task.wait()
+			end
+		end
+	end)
+end
+
+local function setTerrainDetail(value)
+	if not Terrain then return end
+	local ok = pcall(function() Terrain:SetTerrainDetail(value) end)
+	if not ok then
+		pcall(function() Terrain:SetTerrainDetail(nil, value) end)
+	end
+end
+
+local function applyBoost(level)
+	local strength = 1
+	if level == "Agresivo" then
+		strength = 3
+	elseif level == "Medio" then
+		strength = 2
+	end
+
+	if UserGameSettings then
+		pcall(function()
+			setProp(UserGameSettings, "SavedQualityLevel", Enum.SavedQualitySetting.QualityLevel1)
+		end)
+	end
+
+	setProp(Lighting, "GlobalShadows", false)
+	setProp(Lighting, "EnvironmentDiffuseScale", 0)
+	setProp(Lighting, "EnvironmentSpecularScale", 0)
+	setProp(Lighting, "Brightness", 2)
+	setProp(Lighting, "Ambient", Color3.fromRGB(90, 95, 105))
+	setProp(Lighting, "OutdoorAmbient", Color3.fromRGB(110, 115, 125))
+
+	for _, child in ipairs(Lighting:GetChildren()) do
+		if child:IsA("PostEffect") then
+			setProp(child, "Enabled", false)
+		end
+	end
+
+	if Terrain then
+		pcall(function() setProp(Terrain, "WaterWaveSize", 0) end)
+		pcall(function() setProp(Terrain, "WaterWaveSpeed", 0) end)
+		pcall(function() setProp(Terrain, "WaterReflectance", 0) end)
+		pcall(function() setProp(Terrain, "Decoration", false) end)
+		pcall(function() setProp(Terrain, "GrassLength", 0) end)
+		setTerrainDetail(1)
+	end
+
+	if strength >= 2 then
+		setProp(Lighting, "FogEnd", strength >= 3 and 220 or 450)
+	end
+
+	forEachDescendant(function(inst)
+		if inst:IsA("BasePart") then
+			setProp(inst, "CastShadow", false)
+		end
+
+		if strength >= 2 then
+			if inst:IsA("ParticleEmitter")
+				or inst:IsA("Smoke")
+				or inst:IsA("Fire")
+				or inst:IsA("Sparkles")
+				or inst:IsA("Beam")
+				or inst:IsA("Trail") then
+				setProp(inst, "Enabled", false)
+			end
+		end
+
+		if strength >= 3 then
+			if inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
+				setProp(inst, "Enabled", false)
+			end
+			if inst:IsA("Decal") or inst:IsA("Texture") then
+				setProp(inst, "Transparency", 1)
+			end
+		end
+	end)
+
+	if strength >= 3 then
+		for _, child in ipairs(Lighting:GetChildren()) do
+			if child:IsA("Atmosphere") or child:IsA("Sky") or child:IsA("Clouds") then
+				hideInstance(child)
+			end
+		end
+	end
+end
+
+local function restoreBoost()
+	for _, entry in ipairs(hiddenInstances) do
+		if entry.inst and entry.parent then
+			pcall(function() entry.inst.Parent = entry.parent end)
+		end
+	end
+	table.clear(hiddenInstances)
+
+	for inst, rec in pairs(savedProps) do
+		if inst then
+			for prop, value in pairs(rec) do
+				pcall(function() inst[prop] = value end)
+			end
+		end
+	end
+	table.clear(savedProps)
+
+	if Terrain then
+		setTerrainDetail(3)
+	end
+end
+
+local function updateBoostUI()
+	if boostActive then
+		buttonBase[applyBoostButton] = Color3.fromRGB(153, 27, 27)
+		applyBoostButton.Text = "Desactivar boost"
+		boostStateLabel.Text = "Boost activo - nivel " .. boostLevel
+		boostStateLabel.TextColor3 = Color3.fromRGB(34, 197, 94)
+	else
+		buttonBase[applyBoostButton] = Color3.fromRGB(21, 128, 61)
+		applyBoostButton.Text = "Activar boost"
+		boostStateLabel.Text = "Boost desactivado"
+		boostStateLabel.TextColor3 = Color3.fromRGB(120, 132, 152)
+	end
+	TweenService:Create(applyBoostButton, HOVER_TWEEN, {BackgroundColor3 = buttonBase[applyBoostButton]}):Play()
+
+	for name, btn in pairs(levelButtons) do
+		local selected = (name == boostLevel)
+		buttonBase[btn] = selected and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(30, 35, 47)
+		TweenService:Create(btn, HOVER_TWEEN, {
+			BackgroundColor3 = buttonBase[btn],
+			TextColor3 = selected and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(148, 163, 184),
+		}):Play()
+	end
+end
+
+local function selectBoostLevel(level)
+	boostLevel = level
+	if boostActive then
+		restoreBoost()
+		applyBoost(level)
+		setStatus("Boost FPS reajustado: " .. level, spectating, selectedPlayer)
+	end
+	updateBoostUI()
+end
+
+-- Contador de FPS real
+local fpsFrames = 0
+local fpsElapsed = 0
+
+table.insert(connections, RunService.RenderStepped:Connect(function(dt)
+	fpsFrames += 1
+	fpsElapsed += dt
+
+	if fpsElapsed >= 0.5 then
+		local value = math.floor(fpsFrames / fpsElapsed + 0.5)
+		fpsFrames = 0
+		fpsElapsed = 0
+
+		if fpsValueLabel and fpsValueLabel.Parent then
+			fpsValueLabel.Text = tostring(value)
+			if value >= 50 then
+				fpsValueLabel.TextColor3 = Color3.fromRGB(34, 197, 94)
+			elseif value >= 30 then
+				fpsValueLabel.TextColor3 = Color3.fromRGB(234, 179, 8)
+			else
+				fpsValueLabel.TextColor3 = Color3.fromRGB(239, 68, 68)
+			end
+		end
+	end
+end))
+
+local rebuildPlayerList -- declaración adelantada
+local updateCamera -- declaración adelantada (evita depender de un global)
+
+local function switchTab(tabName)
+	activeTab = tabName
+	local isSpectate = (tabName == "Spectate")
+	local isTeleport = (tabName == "Teleport")
+	local isFps = (tabName == "FPS")
+
+	spectateSection.Visible = isSpectate
+	teleportSection.Visible = isTeleport
+	fpsSection.Visible = isFps
+	searchBox.Visible = not isFps
+	playerListFrame.Visible = not isFps
+
+	TweenService:Create(spectateTabButton, HOVER_TWEEN, {
+		BackgroundColor3 = isSpectate and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(22, 25, 33),
+		TextColor3 = isSpectate and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(148, 163, 184),
+	}):Play()
+
+	TweenService:Create(teleportTabButton, HOVER_TWEEN, {
+		BackgroundColor3 = isTeleport and Color3.fromRGB(37, 99, 235) or Color3.fromRGB(22, 25, 33),
+		TextColor3 = isTeleport and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(148, 163, 184),
+	}):Play()
+
+	TweenService:Create(fpsTabButton, HOVER_TWEEN, {
+		BackgroundColor3 = isFps and Color3.fromRGB(21, 128, 61) or Color3.fromRGB(22, 25, 33),
+		TextColor3 = isFps and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(148, 163, 184),
+	}):Play()
+
+	if isTeleport and selectedPlayer then
+		tpButton.Text = "Teletransportar a " .. selectedPlayer.DisplayName
+	else
+		tpButton.Text = "Teletransportar al seleccionado"
+	end
+
+	if rebuildPlayerList then
+		rebuildPlayerList()
+	end
+end
+
+rebuildPlayerList = function()
+	if not screenGui or not screenGui.Parent or not playerListFrame or not playerListFrame.Parent then return end
+
+	for _, child in ipairs(playerListFrame:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+
+	refreshTargets()
+	local query = string.lower(searchBox.Text)
+	local count = 0
+
+	for idx, plr in ipairs(spectateList) do
+		local displayMatch = string.find(string.lower(plr.DisplayName), query, 1, true)
+		local nameMatch = string.find(string.lower(plr.Name), query, 1, true)
+
+		if query == "" or displayMatch or nameMatch then
+			count += 1
+			local btn = Instance.new("TextButton")
+			btn.Name = plr.Name
+			btn.Size = UDim2.new(1, -4, 0, 36)
+			btn.LayoutOrder = count
+			btn.BorderSizePixel = 0
+			btn.Text = ""
+			btn.AutoButtonColor = false
+
+			local isSpectatingThis = (spectating and selectedPlayer == plr)
+			local isSelectedThis = (selectedPlayer == plr)
+
+			local bgColor = Color3.fromRGB(24, 28, 38)
+			if activeTab == "Spectate" and isSpectatingThis then
+				bgColor = Color3.fromRGB(79, 70, 229)
+			elseif isSelectedThis then
+				bgColor = Color3.fromRGB(30, 58, 138)
+			end
+			btn.BackgroundColor3 = bgColor
+
+			local btnCorner = Instance.new("UICorner")
+			btnCorner.CornerRadius = UDim.new(0, 8)
+			btnCorner.Parent = btn
+
+			-- Avatar circular en la lista
+			local avatarImg = Instance.new("ImageLabel")
+			avatarImg.Name = "Avatar"
+			avatarImg.Size = UDim2.new(0, 26, 0, 26)
+			avatarImg.Position = UDim2.new(0, 6, 0.5, -13)
+			avatarImg.BackgroundColor3 = Color3.fromRGB(36, 42, 56)
+			avatarImg.BorderSizePixel = 0
+			avatarImg.Image = ""
+			avatarImg.Parent = btn
+
+			local avatarCorner = Instance.new("UICorner")
+			avatarCorner.CornerRadius = UDim.new(1, 0)
+			avatarCorner.Parent = avatarImg
+
+			applyPlayerAvatar(plr.UserId, avatarImg)
+
+			-- Nombre visible y @usuario
+			local displayLabel = Instance.new("TextLabel")
+			displayLabel.Size = UDim2.new(1, -44, 0, 16)
+			displayLabel.Position = UDim2.new(0, 38, 0, 3)
+			displayLabel.BackgroundTransparency = 1
+			displayLabel.Font = Enum.Font.GothamBold
+			displayLabel.TextSize = 12
+			displayLabel.TextXAlignment = Enum.TextXAlignment.Left
+			displayLabel.TextTruncate = Enum.TextTruncate.AtEnd
+			displayLabel.TextColor3 = Color3.fromRGB(248, 250, 252)
+			displayLabel.Text = plr.DisplayName
+			displayLabel.Parent = btn
+
+			local userLabel = Instance.new("TextLabel")
+			userLabel.Size = UDim2.new(1, -44, 0, 13)
+			userLabel.Position = UDim2.new(0, 38, 0, 19)
+			userLabel.BackgroundTransparency = 1
+			userLabel.Font = Enum.Font.Gotham
+			userLabel.TextSize = 10
+			userLabel.TextXAlignment = Enum.TextXAlignment.Left
+			userLabel.TextTruncate = Enum.TextTruncate.AtEnd
+			userLabel.TextColor3 = Color3.fromRGB(165, 175, 195)
+			userLabel.Text = "@" .. plr.Name
+			userLabel.Parent = btn
+
+			btn.MouseEnter:Connect(function()
+				if not (activeTab == "Spectate" and spectating and selectedPlayer == plr) then
+					TweenService:Create(btn, HOVER_TWEEN, {BackgroundColor3 = Color3.fromRGB(35, 41, 56)}):Play()
+				end
+			end)
+
+			btn.MouseLeave:Connect(function()
+				if not (activeTab == "Spectate" and spectating and selectedPlayer == plr) then
+					local resetCol = (selectedPlayer == plr) and Color3.fromRGB(30, 58, 138) or Color3.fromRGB(24, 28, 38)
+					TweenService:Create(btn, HOVER_TWEEN, {BackgroundColor3 = resetCol}):Play()
+				end
+			end)
+
+			btn.MouseButton1Click:Connect(function()
+				targetIndex = idx
+				selectedPlayer = plr
+
+				if activeTab == "Spectate" then
+					spectating = true
+					updateCamera()
+				else
+					tpButton.Text = "Teletransportar a " .. plr.DisplayName
+					setStatus("Seleccionado para TP: " .. plr.DisplayName, spectating, plr)
+					rebuildPlayerList()
+				end
+			end)
+
+			btn.Parent = playerListFrame
+		end
+	end
+
+	task.defer(function()
+		if playerListFrame and playerListFrame.Parent then
+			playerListFrame.CanvasSize = UDim2.new(0, 0, 0, uiListLayout.AbsoluteContentSize.Y + 14)
+		end
+	end)
+end
+
+local function resetToSelf()
+	spectating = false
+	if player.Character then
+		local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			camera.CameraType = Enum.CameraType.Custom
+			camera.CameraSubject = humanoid
+		end
+	end
+	setStatus("Sin observar a nadie", false, selectedPlayer)
+	rebuildPlayerList()
+end
+
+updateCamera = function()
+	refreshTargets()
+	if #spectateList == 0 then
+		resetToSelf()
+		setStatus("No hay otros jugadores disponibles", false, nil)
+		return
+	end
+
+	if targetIndex > #spectateList then
+		targetIndex = 1
+	elseif targetIndex < 1 then
+		targetIndex = #spectateList
+	end
+
+	local targetPlayer = spectateList[targetIndex]
+	if targetPlayer and targetPlayer.Character then
+		local humanoid = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			spectating = true
+			selectedPlayer = targetPlayer
+			camera.CameraType = Enum.CameraType.Custom
+			camera.CameraSubject = humanoid
+			setStatus("Observando a " .. targetPlayer.DisplayName, true, targetPlayer)
+			rebuildPlayerList()
+		end
+	end
+end
+
+local function teleportToTarget()
+	refreshTargets()
+	local targetPlayer = selectedPlayer or spectateList[targetIndex]
+
+	if not targetPlayer or not targetPlayer.Parent then
+		setStatus("Selecciona un jugador en la lista para TP", spectating, nil)
+		return
+	end
+
+	local targetChar = targetPlayer.Character
+	local myChar = player.Character
+	if not targetChar or not myChar then
+		setStatus("Personaje no disponible para TP", spectating, targetPlayer)
+		return
+	end
+
+	local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+	local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+	if not targetRoot or not myRoot then
+		setStatus("Falta HumanoidRootPart para TP", spectating, targetPlayer)
+		return
+	end
+
+	local destCFrame = targetRoot.CFrame * CFrame.new(0, 0, 3.5)
+	if myChar.PrimaryPart then
+		myChar:PivotTo(destCFrame)
+	else
+		myRoot.CFrame = destCFrame
+	end
+
+	setStatus("TP hacia " .. targetPlayer.DisplayName, spectating, targetPlayer)
+end
+
+-- Helper para calcular posición ligeramente desplazada al animar
+local function getOffsetPosition(basePos, deltaX)
+	return UDim2.new(basePos.X.Scale, basePos.X.Offset + deltaX, basePos.Y.Scale, basePos.Y.Offset)
+end
+
+-- Animación de abrir y cerrar menú
+local function openMenu()
+	if not hubFrame or not hubFrame.Parent then return end
+	animToken += 1
+	local currentToken = animToken
+
+	cancelMenuTweens()
+	isMenuOpen = true
+	rebuildPlayerList()
+
+	hubFrame.Position = getOffsetPosition(homePosition, -16)
+	hubScale.Scale = 0.92
+	hubFrame.Visible = true
+
+	local posTween = TweenService:Create(hubFrame, OPEN_TWEEN, {Position = homePosition})
+	local scaleTween = TweenService:Create(hubScale, OPEN_TWEEN, {Scale = 1})
+
+	table.insert(activeTweens, posTween)
+	table.insert(activeTweens, scaleTween)
+
+	posTween:Play()
+	scaleTween:Play()
+
+	scaleTween.Completed:Connect(function(playbackState)
+		if currentToken == animToken and playbackState == Enum.PlaybackState.Completed then
+			hubScale.Scale = 1
+			hubFrame.Position = homePosition
+		end
+	end)
+end
+
+local function closeMenu(callback)
+	if not hubFrame or not hubFrame.Parent or not isMenuOpen then
+		if callback then callback() end
+		return
+	end
+	animToken += 1
+	local currentToken = animToken
+
+	cancelMenuTweens()
+	isMenuOpen = false
+
+	local posTween = TweenService:Create(hubFrame, CLOSE_TWEEN, {Position = getOffsetPosition(homePosition, -16)})
+	local scaleTween = TweenService:Create(hubScale, CLOSE_TWEEN, {Scale = 0.92})
+
+	table.insert(activeTweens, posTween)
+	table.insert(activeTweens, scaleTween)
+
+	posTween:Play()
+	scaleTween:Play()
+
+	scaleTween.Completed:Connect(function(playbackState)
+		if currentToken == animToken then
+			if hubFrame and hubFrame.Parent and playbackState ~= Enum.PlaybackState.Cancelled then
+				hubFrame.Visible = false
+			end
+			if callback then
+				callback()
+			end
+		end
+	end)
+end
+
+local function toggleHub()
+	if isMenuOpen then
+		closeMenu()
+	else
+		openMenu()
+	end
+end
+
+-- Cerrar y descargar el script por completo con animación
+local function closeScript()
+	resetToSelf()
+	selectedPlayer = nil
+
+	local function cleanup()
+		cancelMenuTweens()
+
+		-- Devolver los gráficos originales antes de destruir la UI
+		if boostActive then
+			boostActive = false
+			restoreBoost()
+		end
+
+		table.clear(thumbnailCache)
+		for _, conn in ipairs(connections) do
+			if conn and conn.Connected then
+				conn:Disconnect()
+			end
+		end
+		table.clear(connections)
+
+		if screenGui then
+			screenGui:Destroy()
+		end
+
+		-- Anti-VCB no se descarga: sigue activo hasta salir del servidor.
+		if script then
+			script.Disabled = true
+			script:Destroy()
+		end
+	end
+
+	if isMenuOpen then
+		closeMenu(cleanup)
+	else
+		cleanup()
+	end
+end
+
+-- Arrastrar el menú desde la barra superior (HeaderFrame)
+local function updateDrag(input)
+	local delta = input.Position - dragStart
+	local newPos = UDim2.new(
+		startPos.X.Scale,
+		startPos.X.Offset + delta.X,
+		startPos.Y.Scale,
+		startPos.Y.Offset + delta.Y
+	)
+	hubFrame.Position = newPos
+	homePosition = newPos
+end
+
+table.insert(connections, headerFrame.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		cancelMenuTweens()
+		dragging = true
+		dragInput = input
+		dragStart = input.Position
+		startPos = hubFrame.Position
+	end
+end))
+
+table.insert(connections, headerFrame.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end))
+
+table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+	if dragging and input == dragInput then
+		updateDrag(input)
+	end
+end))
+
+table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+	if input == dragInput then
+		dragging = false
+		dragInput = nil
+	end
+end))
+
+-- Inicializar estado visual de pestañas
+switchTab("Spectate")
+updateBoostUI()
+
+-- Eventos de interfaz
+table.insert(connections, spectateTabButton.MouseButton1Click:Connect(function()
+	switchTab("Spectate")
+end))
+
+table.insert(connections, teleportTabButton.MouseButton1Click:Connect(function()
+	switchTab("Teleport")
+end))
+
+table.insert(connections, fpsTabButton.MouseButton1Click:Connect(function()
+	switchTab("FPS")
+end))
+
+table.insert(connections, hideMenuButton.MouseEnter:Connect(function()
+	TweenService:Create(hideMenuButton, HOVER_TWEEN, {BackgroundColor3 = Color3.fromRGB(51, 58, 76)}):Play()
+end))
+
+table.insert(connections, hideMenuButton.MouseLeave:Connect(function()
+	TweenService:Create(hideMenuButton, HOVER_TWEEN, {BackgroundColor3 = Color3.fromRGB(32, 37, 49)}):Play()
+end))
+
+table.insert(connections, hideMenuButton.MouseButton1Click:Connect(function()
+	closeMenu()
+end))
+
+table.insert(connections, searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	rebuildPlayerList()
+end))
+
+table.insert(connections, prevButton.MouseButton1Click:Connect(function()
+	targetIndex -= 1
+	updateCamera()
+end))
+
+table.insert(connections, nextButton.MouseButton1Click:Connect(function()
+	targetIndex += 1
+	updateCamera()
+end))
+
+table.insert(connections, stopButton.MouseButton1Click:Connect(function()
+	resetToSelf()
+end))
+
+table.insert(connections, tpButton.MouseButton1Click:Connect(function()
+	teleportToTarget()
+end))
+
+-- Botones del apartado FPS
+for levelName, btn in pairs(levelButtons) do
+	table.insert(connections, btn.MouseButton1Click:Connect(function()
+		selectBoostLevel(levelName)
+	end))
+end
+
+table.insert(connections, applyBoostButton.MouseButton1Click:Connect(function()
+	if boostActive then
+		boostActive = false
+		restoreBoost()
+		setStatus("Boost FPS desactivado", spectating, selectedPlayer)
+	else
+		boostActive = true
+		applyBoost(boostLevel)
+		setStatus("Boost FPS activo (" .. boostLevel .. ")", spectating, selectedPlayer)
+	end
+	updateBoostUI()
+end))
+
+table.insert(connections, restoreBoostButton.MouseButton1Click:Connect(function()
+	if boostActive then
+		boostActive = false
+	end
+	restoreBoost()
+	updateBoostUI()
+	setStatus("Gráficos originales restaurados", spectating, selectedPlayer)
+end))
+
+-- Recargar Anti-VCB manualmente con feedback en el propio botón
+table.insert(connections, antiVcbButton.MouseButton1Click:Connect(function()
+	local ok = runAntiVCB()
+	antiVcbButton.Text = ok and "Anti-VCB ✓" or "Falló"
+	setStatus(ok and "Anti-VCB recargado" or "Anti-VCB no se pudo cargar", spectating, selectedPlayer)
+	task.delay(1.3, function()
+		if antiVcbButton and antiVcbButton.Parent then
+			antiVcbButton.Text = "Anti-VCB"
+		end
+	end)
+end))
+
+table.insert(connections, unloadButton.MouseButton1Click:Connect(function()
+	closeScript()
+end))
+
+-- Actualizar lista cuando entren o salgan jugadores
+table.insert(connections, Players.PlayerAdded:Connect(function()
+	task.wait(0.5)
+	if isMenuOpen then
+		rebuildPlayerList()
+	end
+end))
+
+table.insert(connections, Players.PlayerRemoving:Connect(function(plr)
+	thumbnailCache[plr.UserId] = nil
+	if selectedPlayer == plr then
+		selectedPlayer = nil
+	end
+	if spectating and not selectedPlayer then
+		updateCamera()
+	elseif isMenuOpen then
+		rebuildPlayerList()
+	end
+end))
+
+-- Tecla para abrir/cerrar el hub con animación
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == TOGGLE_KEY then
+		toggleHub()
+	end
+end))
+
+table.insert(connections, player.CharacterAdded:Connect(function(char)
+	local humanoid = char:WaitForChild("Humanoid")
+	if not spectating then
+		camera.CameraSubject = humanoid
+	end
+end))
+
+-- Ejecutar Anti-VCB al iniciar (fuera del hilo principal para no bloquear la UI)
+task.spawn(runAntiVCB)
